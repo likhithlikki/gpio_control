@@ -39,12 +39,21 @@ h1{font-size:20px;margin:0 0 10px}
 #login button{padding:10px 18px;font-size:16px;border:0;border-radius:8px;background:var(--on);color:#fff}
 #msg{color:var(--bad);font-size:14px;min-height:18px}
 #foot{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+#toast{position:fixed;top:0;left:0;right:0;z-index:9;padding:12px 16px;text-align:center;font-weight:600;color:#fff;transform:translateY(-110%);transition:transform .3s;cursor:pointer}
+#toast.show{transform:none}#toast.t-on{background:#15803d}#toast.t-off{background:#b91c1c}
+#last{color:var(--muted);font-size:13px;margin:-6px 0 12px}
+.switch.dis{opacity:.45}.switch input:disabled{cursor:not-allowed}
+.stage{width:100%;font-size:13px;font-weight:600}.s-info{color:var(--info)}.s-ok{color:var(--ok)}.s-wait{color:var(--warn)}.s-bad{color:var(--bad)}
+.lg{display:flex;flex-wrap:wrap;justify-content:space-between;gap:2px 8px;padding:8px 0;border-top:1px solid var(--line);font-size:13px}
+.lg .t{color:var(--muted);width:100%;font-size:12px}
 </style>
 </head>
 <body>
+<div id="toast"></div>
 <div class="wrap">
   <h1>GPIO Controller</h1>
   <div id="board" class="pill wait">Connecting…</div>
+  <div id="last"></div>
   <div id="login" hidden>
     <div>Enter the access key</div>
     <input id="keyin" type="password" autocomplete="off" placeholder="Secret key">
@@ -52,6 +61,7 @@ h1{font-size:20px;margin:0 0 10px}
     <div id="msg"></div>
   </div>
   <div id="pins"></div>
+  <div class="card"><div class="name">Activity log (IST)</div><div id="logs" class="meta">Loading…</div></div>
   <div id="foot"></div>
 </div>
 
@@ -60,7 +70,7 @@ h1{font-size:20px;margin:0 0 10px}
 var API = 'https://script.google.com/macros/s/AKfycbwXd6wb8hsREkobud88okB95VDnytHa7HPUFHBPZAVRFGOEMyWKzDFUBm-umvxfuTrpgg/exec';
 /* ================================================================================ */
 
-var KEY = '', built = '', busy = false, pinLock = {}, refs = {};
+var KEY = '', built = '', busy = false, refs = {}, cmds = {}, prevOnline = null, online = false, toastT = 0, logN = 0;
 try { KEY = localStorage.getItem('gpioKey') || ''; } catch (e) {}
 
 function $(id) { return document.getElementById(id); }
@@ -134,26 +144,103 @@ function build(pins) {
     var des = document.createElement('span'), act = document.createElement('span');
     var badge = document.createElement('span'); badge.className = 'badge';
     var det = document.createElement('span'); det.className = 'detail';
+    var stg = document.createElement('span'); stg.className = 'stage';
     if (p.dir === 'out') vals.appendChild(des);
-    vals.appendChild(act); vals.appendChild(badge); vals.appendChild(det);
+    vals.appendChild(act); vals.appendChild(badge); vals.appendChild(det); vals.appendChild(stg);
     card.appendChild(vals);
     host.appendChild(card);
-    refs[p.id] = { cb: cb, des: des, act: act, badge: badge, det: det };
+    refs[p.id] = { cb: cb, des: des, act: act, badge: badge, det: det, stg: stg, cmdT: 0 };
   });
 }
 
 function update(p) {
   var r = refs[p.id]; if (!r) return;
-  if (r.cb && !(pinLock[p.id] && pinLock[p.id] > Date.now())) r.cb.checked = p.desired === 1;
+  var c = cmds[p.id];
+  if (r.cb && !(c && c.stage === 'sending')) r.cb.checked = p.desired === 1;
   r.des.textContent = 'Desired: ' + fmt(p, p.desired);
   r.act.textContent = 'Actual: ' + fmt(p, p.actual);
   r.badge.className = 'badge b-' + p.state;
   r.badge.textContent = LABEL[p.state] || p.state;
   r.det.textContent = p.detail || '';
+  if (c && (c.stage === 'sent' || c.stage === 'waiting') && p.cmd && p.cmd.t !== c.prevT && p.cmd.res !== 'pending') {
+    c.stage = p.cmd.res === 'success' ? 'done' : 'failed';
+    c.ms = p.cmd.ms; c.why = p.detail || 'no confirmation';
+    loadLogs();
+  }
+  r.cmdT = p.cmd ? p.cmd.t : 0;
+  showStage(p.id);
+}
+
+function showStage(id) {
+  var r = refs[id], c = cmds[id]; if (!r || !r.stg) return;
+  if (!c) { r.stg.textContent = ''; return; }
+  var el = Math.round((Date.now() - c.t0) / 1000), t, k;
+  if (c.stage === 'sending') { t = 'Sending…'; k = 'info'; }
+  else if (c.stage === 'sent') { t = '✔ Sent successfully'; k = 'ok'; }
+  else if (c.stage === 'waiting') { t = '⏳ Waiting for response… ' + el + ' s'; k = 'wait'; }
+  else if (c.stage === 'done') { t = '✔ Done successfully · ' + (c.ms / 1000).toFixed(1) + ' s'; k = 'ok'; }
+  else { t = '✖ Failed · ' + (c.why || 'error'); k = 'bad'; }
+  r.stg.textContent = t; r.stg.className = 'stage s-' + k;
+}
+
+function running() {
+  return Object.keys(cmds).some(function (id) { var s = cmds[id].stage; return s === 'sending' || s === 'sent' || s === 'waiting'; });
+}
+function lockAll() {
+  var lock = running() || !online;
+  Object.keys(refs).forEach(function (id) {
+    var cb = refs[id].cb; if (!cb) return;
+    cb.disabled = lock; cb.parentNode.className = 'switch' + (lock ? ' dis' : '');
+  });
+}
+
+function toast(kind, text) {
+  var t = $('toast'); t.className = 'show t-' + kind; t.textContent = text;
+  clearTimeout(toastT);
+  if (kind === 'on') toastT = setTimeout(function () { t.className = ''; }, 6000);
+}
+$('toast').onclick = function () { this.className = ''; };
+
+function desc(x) {
+  var v = String(x.value) === '1' ? 'ON' : 'OFF';
+  if (x.event === 'command sent') return 'Sent: ' + x.pin + ' → ' + v;
+  if (x.event === 'command done') return 'Done: ' + x.pin + ' → ' + v;
+  if (x.event === 'command failed') return 'Failed: ' + x.pin + ' → ' + v + (x.source ? ' (' + x.source + ')' : '');
+  if (x.event === 'actual') return 'Board reports ' + x.pin + ' = ' + (String(x.value) === 'E' ? 'ERROR' : v);
+  var e = String(x.event); return e.charAt(0).toUpperCase() + e.slice(1) + (x.pin ? ' ' + x.pin : '');
+}
+
+async function loadLogs() {
+  try {
+    var r = await call('logs', { n: 50 });
+    if (!r.ok) return;
+    var host = $('logs'), closed = {}; host.textContent = '';
+    r.rows.forEach(function (x) {
+      if (x.event === 'command done' || x.event === 'command failed') closed[x.pin] = 1;
+      else if (x.event === 'command sent' && closed[x.pin]) { delete closed[x.pin]; return; }
+      var row = document.createElement('div'); row.className = 'lg';
+      var t = document.createElement('div'); t.className = 't'; t.textContent = x.time;
+      var d = document.createElement('span'); d.textContent = desc(x);
+      var b = document.createElement('span');
+      if (x.result) {
+        b.className = 'badge ' + (x.result === 'Success' ? 'b-confirmed' : x.result === 'Failed' ? 'b-error' : 'b-pending');
+        b.textContent = x.result + (x.secs !== '' ? ' · ' + x.secs + ' s' : '');
+      }
+      row.appendChild(t); row.appendChild(d); row.appendChild(b); host.appendChild(row);
+    });
+    if (!r.rows.length) host.textContent = 'No entries yet';
+  } catch (e) {}
 }
 
 function render(s) {
   var b = $('board');
+  online = s.online;
+  if ((prevOnline === null && !s.online) || (prevOnline !== null && s.online !== prevOnline)) {
+    toast(s.online ? 'on' : 'off', s.online ? '✔ Board is ONLINE' : '✖ Board is OFFLINE');
+  }
+  prevOnline = s.online;
+  document.title = (s.online ? '● ' : '○ ') + 'GPIO Controller';
+  $('last').textContent = 'Last active: ' + (s.seenAt ? s.seenAt + ' IST' : 'never');
   if (s.online) { b.className = 'pill on'; b.textContent = 'Board online · seen ' + s.seenAgo + 's ago'; }
   else {
     b.className = 'pill off';
@@ -162,21 +249,26 @@ function render(s) {
   var sig = s.pins.map(function (p) { return [p.id, p.name, p.gpio, p.dir].join(':'); }).join(',');
   if (sig !== built) { build(s.pins); built = sig; }
   s.pins.forEach(update);
+  lockAll();
+}
+
+function fail(id, why) {
+  cmds[id].stage = 'failed'; cmds[id].why = why; showStage(id); lockAll();
 }
 
 async function toggle(id, cb) {
-  pinLock[id] = Date.now() + 4000; // don't let an in-flight refresh flip the switch back
+  if (running() || !online) { cb.checked = !cb.checked; return; }
+  cmds[id] = { stage: 'sending', t0: Date.now(), prevT: refs[id].cmdT || 0 };
+  lockAll(); showStage(id);
   try {
     var res = await call('setPin', { pin: id, value: cb.checked ? 1 : 0 });
     if (!res.ok) {
-      delete pinLock[id];
       if (res.error === 'badkey') { KEY = ''; showLogin('Wrong key'); return; }
-      $('foot').textContent = 'Error: ' + res.error;
+      fail(id, res.error); return;
     }
-  } catch (e) {
-    delete pinLock[id];
-    $('foot').textContent = 'Could not send: ' + (e && e.message ? e.message : e);
-  }
+    cmds[id].stage = 'sent'; showStage(id);
+    setTimeout(function () { if (cmds[id] && cmds[id].stage === 'sent') { cmds[id].stage = 'waiting'; showStage(id); } }, 800);
+  } catch (e) { fail(id, 'could not send'); }
   refresh();
 }
 
@@ -193,6 +285,7 @@ async function refresh() {
     } else {
       $('login').hidden = true;
       render(s);
+      if (logN++ % 4 === 0) loadLogs();
       $('foot').textContent = 'Updated ' + s.now + ' IST · refreshes every 2 s';
     }
   } catch (e) {
@@ -200,6 +293,15 @@ async function refresh() {
   } finally { busy = false; }
 }
 
+setInterval(function () {
+  Object.keys(cmds).forEach(function (id) {
+    var c = cmds[id];
+    if (c.stage === 'sending' || c.stage === 'sent' || c.stage === 'waiting') {
+      if (Date.now() - c.t0 > 25000) { c.stage = 'failed'; c.why = 'no answer'; lockAll(); }
+      showStage(id);
+    }
+  });
+}, 500);
 refresh();
 setInterval(refresh, 2000);
 </script>
