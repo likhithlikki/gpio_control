@@ -1,7 +1,6 @@
 <!DOCTYPE html>
 <html>
 <head>
-<base target="_top">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GPIO Controller</title>
@@ -57,17 +56,23 @@ h1{font-size:20px;margin:0 0 10px}
 </div>
 
 <script>
+/* ===== the ONLY thing to edit: your Apps Script Web app URL (ends in /exec) ===== */
+var API = 'PASTE_YOUR_WEB_APP_URL_HERE';
+/* ================================================================================ */
+
 var KEY = '', built = '', busy = false, pinLock = {}, refs = {};
 try { KEY = localStorage.getItem('gpioKey') || ''; } catch (e) {}
 
 function $(id) { return document.getElementById(id); }
 
-function run(fn) {
-  var args = [].slice.call(arguments, 1);
-  return new Promise(function (ok, fail) {
-    var r = google.script.run.withSuccessHandler(ok).withFailureHandler(fail);
-    r[fn].apply(r, args);
-  });
+// call the Apps Script web app: GET ?action=...&key=...
+async function call(action, params) {
+  var q = new URLSearchParams(Object.assign({ action: action, key: KEY }, params || {}));
+  var r = await fetch(API + '?' + q.toString(), { cache: 'no-store' });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  var t = await r.text();
+  try { return JSON.parse(t); }
+  catch (e) { throw new Error('Bad reply from server (check the URL / deployment)'); }
 }
 
 function showLogin(msg) {
@@ -162,7 +167,7 @@ function render(s) {
 async function toggle(id, cb) {
   pinLock[id] = Date.now() + 4000; // don't let an in-flight refresh flip the switch back
   try {
-    var res = await run('webSetPin', KEY, id, cb.checked ? 1 : 0);
+    var res = await call('setPin', { pin: id, value: cb.checked ? 1 : 0 });
     if (!res.ok) {
       delete pinLock[id];
       if (res.error === 'badkey') { KEY = ''; showLogin('Wrong key'); return; }
@@ -180,7 +185,7 @@ async function refresh() {
   if (busy) return;
   busy = true;
   try {
-    var s = await run('webStatus', KEY);
+    var s = await call('status');
     if (!s.ok) {
       KEY = '';
       try { localStorage.removeItem('gpioKey'); } catch (e) {}
@@ -188,7 +193,7 @@ async function refresh() {
     } else {
       $('login').hidden = true;
       render(s);
-    $('foot').textContent = 'Updated ' + s.now + ' IST · refreshes every 2 s';
+      $('foot').textContent = 'Updated ' + s.now + ' IST · refreshes every 2 s';
     }
   } catch (e) {
     $('foot').textContent = 'Connection problem: ' + (e && e.message ? e.message : e);
