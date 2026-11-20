@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GPIO Controller</title>
+<style>
+:root{--bg:#f4f5f7;--card:#fff;--fg:#1c1e21;--muted:#6b7280;--line:#e5e7eb;
+--ok:#15803d;--okbg:#dcfce7;--warn:#b45309;--warnbg:#fef3c7;--bad:#b91c1c;--badbg:#fee2e2;--info:#1d4ed8;--infobg:#dbeafe;--on:#2563eb}
+@media (prefers-color-scheme:dark){:root{--bg:#111318;--card:#1b1e26;--fg:#e8eaed;--muted:#9aa0a6;--line:#2a2f3a;
+--ok:#6ee7a0;--okbg:#12361f;--warn:#fbbf24;--warnbg:#3a2a0c;--bad:#fca5a5;--badbg:#3b1414;--info:#93c5fd;--infobg:#14284d}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:560px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 10px}
+.pill{display:inline-block;padding:6px 12px;border-radius:999px;font-size:14px;font-weight:600;margin-bottom:14px}
+.pill.on{background:var(--okbg);color:var(--ok)}
+.pill.off{background:var(--badbg);color:var(--bad)}
+.pill.wait{background:var(--warnbg);color:var(--warn)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin-bottom:12px}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.name{font-weight:600;font-size:17px}
+.meta{color:var(--muted);font-size:13px}
+.vals{display:flex;flex-wrap:wrap;align-items:center;gap:6px 14px;margin-top:10px;font-size:14px}
+.badge{margin-left:auto;padding:3px 10px;border-radius:999px;font-size:13px;font-weight:600}
+.b-confirmed{background:var(--okbg);color:var(--ok)}
+.b-pending{background:var(--warnbg);color:var(--warn)}
+.b-error{background:var(--badbg);color:var(--bad)}
+.b-input{background:var(--infobg);color:var(--info)}
+.detail{color:var(--muted);font-size:12px;width:100%}
+.switch{position:relative;width:56px;height:32px;flex:none}
+.switch input{position:absolute;inset:0;width:100%;height:100%;margin:0;opacity:0;cursor:pointer;z-index:1}
+.switch span{position:absolute;inset:0;background:#9ca3af;border-radius:32px;transition:.2s}
+.switch span:before{content:"";position:absolute;left:3px;top:3px;width:26px;height:26px;background:#fff;border-radius:50%;transition:.2s}
+.switch input:checked+span{background:var(--on)}
+.switch input:checked+span:before{transform:translateX(24px)}
+#login{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+#login input{width:100%;padding:10px;font-size:16px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);margin:8px 0}
+#login button{padding:10px 18px;font-size:16px;border:0;border-radius:8px;background:var(--on);color:#fff}
+#msg{color:var(--bad);font-size:14px;min-height:18px}
+#foot{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GPIO Controller</h1>
+  <div id="board" class="pill wait">Connecting…</div>
+  <div id="login" hidden>
+    <div>Enter the access key</div>
+    <input id="keyin" type="password" autocomplete="off" placeholder="Secret key">
+    <button id="keybtn">Unlock</button>
+    <div id="msg"></div>
+  </div>
+  <div id="pins"></div>
+  <div id="foot"></div>
+</div>
+
+<script>
+var KEY = '', built = '', busy = false, pinLock = {}, refs = {};
+try { KEY = localStorage.getItem('gpioKey') || ''; } catch (e) {}
+
+function $(id) { return document.getElementById(id); }
+
+function run(fn) {
+  var args = [].slice.call(arguments, 1);
+  return new Promise(function (ok, fail) {
+    var r = google.script.run.withSuccessHandler(ok).withFailureHandler(fail);
+    r[fn].apply(r, args);
+  });
+}
+
+function showLogin(msg) {
+  $('login').hidden = false;
+  $('pins').innerHTML = ''; built = ''; refs = {};
+  $('msg').textContent = msg || '';
+  $('board').className = 'pill wait';
+  $('board').textContent = 'Locked';
+}
+
+$('keybtn').onclick = function () {
+  KEY = $('keyin').value.trim();
+  if (!KEY) return;
+  try { localStorage.setItem('gpioKey', KEY); } catch (e) {}
+  $('keyin').value = '';
+  refresh();
+};
+$('keyin').onkeydown = function (e) { if (e.key === 'Enter') $('keybtn').onclick(); };
+
+function ago(sec) {
+  if (sec < 60) return sec + 's ago';
+  if (sec < 3600) return Math.floor(sec / 60) + ' min ago';
+  return Math.floor(sec / 3600) + ' h ago';
+}
+
+function fmt(p, v) {
+  if (v === null || v === undefined) return '—';
+  v = String(v);
+  if (v === 'E') return 'ERROR';
+  if (p.dir === 'in') return v === '1' ? 'HIGH' : 'LOW';
+  return v === '1' ? 'ON' : 'OFF';
+}
+
+var LABEL = { confirmed: 'Confirmed', pending: 'Pending', error: 'Mismatch / Error', input: 'Input' };
+
+function build(pins) {
+  var host = $('pins');
+  host.innerHTML = ''; refs = {};
+  pins.forEach(function (p) {
+    var card = document.createElement('div'); card.className = 'card';
+    var row = document.createElement('div'); row.className = 'row';
+    var left = document.createElement('div');
+    var nm = document.createElement('div'); nm.className = 'name'; nm.textContent = p.name;
+    var mt = document.createElement('div'); mt.className = 'meta';
+    mt.textContent = 'GPIO ' + p.gpio + ' · ' + (p.dir === 'out' ? 'output' : 'input');
+    left.appendChild(nm); left.appendChild(mt); row.appendChild(left);
+
+    var cb = null;
+    if (p.dir === 'out') {
+      var lab = document.createElement('label'); lab.className = 'switch';
+      cb = document.createElement('input'); cb.type = 'checkbox';
+      var sp = document.createElement('span');
+      lab.appendChild(cb); lab.appendChild(sp); row.appendChild(lab);
+      cb.addEventListener('change', function () { toggle(p.id, cb); });
+    }
+    card.appendChild(row);
+
+    var vals = document.createElement('div'); vals.className = 'vals';
+    var des = document.createElement('span'), act = document.createElement('span');
+    var badge = document.createElement('span'); badge.className = 'badge';
+    var det = document.createElement('span'); det.className = 'detail';
+    if (p.dir === 'out') vals.appendChild(des);
+    vals.appendChild(act); vals.appendChild(badge); vals.appendChild(det);
+    card.appendChild(vals);
+    host.appendChild(card);
+    refs[p.id] = { cb: cb, des: des, act: act, badge: badge, det: det };
+  });
+}
+
+function update(p) {
+  var r = refs[p.id]; if (!r) return;
+  if (r.cb && !(pinLock[p.id] && pinLock[p.id] > Date.now())) r.cb.checked = p.desired === 1;
+  r.des.textContent = 'Desired: ' + fmt(p, p.desired);
+  r.act.textContent = 'Actual: ' + fmt(p, p.actual);
+  r.badge.className = 'badge b-' + p.state;
+  r.badge.textContent = LABEL[p.state] || p.state;
+  r.det.textContent = p.detail || '';
+}
+
+function render(s) {
+  var b = $('board');
+  if (s.online) { b.className = 'pill on'; b.textContent = 'Board online · seen ' + s.seenAgo + 's ago'; }
+  else {
+    b.className = 'pill off';
+    b.textContent = s.seenAgo === null ? 'Board offline · never seen' : 'Board offline · last seen ' + ago(s.seenAgo);
+  }
+  var sig = s.pins.map(function (p) { return [p.id, p.name, p.gpio, p.dir].join(':'); }).join(',');
+  if (sig !== built) { build(s.pins); built = sig; }
+  s.pins.forEach(update);
+}
+
+async function toggle(id, cb) {
+  pinLock[id] = Date.now() + 4000; // don't let an in-flight refresh flip the switch back
+  try {
+    var res = await run('webSetPin', KEY, id, cb.checked ? 1 : 0);
+    if (!res.ok) {
+      delete pinLock[id];
+      if (res.error === 'badkey') { KEY = ''; showLogin('Wrong key'); return; }
+      $('foot').textContent = 'Error: ' + res.error;
+    }
+  } catch (e) {
+    delete pinLock[id];
+    $('foot').textContent = 'Could not send: ' + (e && e.message ? e.message : e);
+  }
+  refresh();
+}
+
+async function refresh() {
+  if (!KEY) { showLogin(''); return; }
+  if (busy) return;
+  busy = true;
+  try {
+    var s = await run('webStatus', KEY);
+    if (!s.ok) {
+      KEY = '';
+      try { localStorage.removeItem('gpioKey'); } catch (e) {}
+      showLogin(s.error === 'badkey' ? 'Wrong key' : 'Error: ' + s.error);
+    } else {
+      $('login').hidden = true;
+      render(s);
+    $('foot').textContent = 'Updated ' + s.now + ' IST · refreshes every 2 s';
+    }
+  } catch (e) {
+    $('foot').textContent = 'Connection problem: ' + (e && e.message ? e.message : e);
+  } finally { busy = false; }
+}
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
