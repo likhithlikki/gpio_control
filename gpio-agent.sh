@@ -4,7 +4,7 @@
 # Pins come from the server (the PINS list in Code.gs) - nothing pin-specific lives here.
 # Debug in the foreground:  DEBUG=1 /usr/local/bin/gpio-agent.sh
 
-CONF=/etc/gpio-agent.conf
+CONF=${CONF:-/etc/gpio-agent.conf}
 LOG=/var/log/gpio-agent.log
 STATE=/var/run/gpio-agent
 SYSFS=/sys/class/gpio
