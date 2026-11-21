@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Board details</title>
+<style>
+:root{--bg:#f4f6f8;--card:#fff;--tx:#111827;--muted:#6b7280;--line:#e5e7eb;--ok:#15803d;--bad:#b91c1c;--hi:#16a34a}
+@media(prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#181b21;--tx:#e5e7eb;--muted:#9ca3af;--line:#2a2f38;--ok:#6ee7a0;--bad:#f87171;--hi:#4ade80}}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px system-ui,sans-serif}
+.w{max-width:900px;margin:0 auto;padding:16px}h1{font-size:22px;margin:4px 0 2px}a{color:inherit}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}
+.card h2{font-size:15px;margin:0 0 8px}.m{color:var(--muted);font-size:13px}
+.r{display:flex;justify-content:space-between;gap:8px;padding:5px 0;border-top:1px solid var(--line)}.r:first-of-type{border-top:0}
+.bar{height:8px;background:var(--line);border-radius:4px;overflow:hidden;margin:4px 0 8px}.bar i{display:block;height:100%;background:var(--ok)}
+.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:0 18px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:4px 6px;border-top:1px solid var(--line)}
+.sc{max-height:520px;overflow:auto}input,select{font:inherit;padding:6px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--tx)}
+.hi{color:var(--hi);font-weight:600}.on{color:var(--ok)}.off{color:var(--bad)}
+</style></head><body><div class="w">
+<a href="index.html">← Back to controls</a>
+<h1>Board details</h1><div id="st" class="m">Loading…</div>
+<div class="m">Read-only. Data is a snapshot every ~5 s while this page is open.</div>
+<div class="card"><h2>Overview</h2><div id="ov" class="g"></div></div>
+<div class="card"><h2>CPU</h2><div id="cpu"></div></div>
+<div class="card"><h2>Memory and storage</h2><div id="mem"></div></div>
+<div class="card"><h2>Clocks</h2><div id="clk" class="g"></div></div>
+<div class="card"><h2>Temperature and voltages</h2><div id="iio" class="g"></div></div>
+<div class="card"><h2>Network</h2><div class="sc"><table id="net"></table></div></div>
+<div class="card"><h2>GPIO pins</h2>
+<p><input id="q" placeholder="Search pin, name…"> <select id="f"><option value="">All</option><option>MIO</option><option>EMIO</option><option value="u">In use / named</option><option value="h">HIGH only</option></select></p>
+<div class="sc"><table id="pins"></table></div>
+<div class="m">MIO 0–53 are the Zynq processor pins, EMIO 54+ go to the FPGA. Levels of the LED pins are logical (active-low). "busy" = owned by a kernel driver, so it cannot be read here.</div></div>
+</div><script>
+var API='https://script.google.com/macros/s/AKfycbwXd6wb8hsREkobud88okB95VDnytHa7HPUFHBPZAVRFGOEMyWKzDFUBm-umvxfuTrpgg/exec',KEY='';
+try{KEY=localStorage.getItem('gpioKey')||''}catch(e){}
+var LABELS={8:'System LED (MIO8)',54:'User LED (EMIO54)',55:'User GPIO (EMIO55)'};  // edit: pin number (0-117) -> your own name
+var $=function(i){return document.getElementById(i)};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function kv(s){var o={};(s||'').split(',').forEach(function(p){var i=p.indexOf(':');if(i>0)o[p.slice(0,i)]=p.slice(i+1)});return o}
+function items(s){return(s&&s!=='-')?s.split('~').filter(Boolean).map(function(x){return x.split('/')}):[]}
+function row(k,v){return'<div class="r"><span>'+esc(k)+'</span><b>'+esc(v)+'</b></div>'}
+function mb(kb){kb=+kb;return isNaN(kb)?'-':kb>=1048576?(kb/1048576).toFixed(2)+' GB':(kb/1024).toFixed(0)+' MB'}
+function mhz(k){k=+k;return isNaN(k)?'-':(k/1000).toFixed(0)+' MHz'}
+function bar(p){return'<div class="bar"><i style="width:'+Math.min(100,Math.max(0,p))+'%"></i></div>'}
+function up(s){s=+s;var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return(d?d+'d ':'')+h+'h '+m+'m'}
+async function call(a){var r=await fetch(API+'?action='+a+'&key='+encodeURIComponent(KEY),{cache:'no-store'});return JSON.parse(await r.text())}
+function render(s){
+  var P=s.parts,sy=P.sys,cl=P.clk,pi=P.pin;
+  $('st').innerHTML=(s.online?'<b class="on">Board online</b>':'<b class="off">Board offline</b>')+(sy?' · data '+sy.ago+' s old':' · waiting for the board to send data (first data within ~10 s)…');
+  if(sy){var a=kv(sy.d),ld=(a.ld||'').split('_');
+    $('ov').innerHTML=row('Uptime',up(a.up))+row('Kernel',a.k)+row('Load (1/5/15 min)',ld.join(' / '))+row('Agent failed polls (last 100 log lines)',a.fl);
+    $('cpu').innerHTML=row('Usage',a.cpu+' %')+bar(+a.cpu)+row('Frequency now',mhz(a.f))+row('Frequency max / min',mhz(a.fm)+' / '+mhz(a.fn))+row('Governor',a.gov);
+    var used=a.mt-a.ma,h=row('RAM used / total',mb(used)+' / '+mb(a.mt))+bar(100*used/a.mt);
+    items(a.d).forEach(function(x){h+=row('Disk '+x[0],mb(x[2])+' / '+mb(x[1]))+bar(100*x[2]/x[1])});$('mem').innerHTML=h;
+    $('net').innerHTML='<tr><th>If</th><th>Link</th><th>Mbit/s</th><th>IP</th><th>MAC</th><th>RX</th><th>TX</th></tr>'+items(a.n).map(function(x){return'<tr><td>'+esc(x[0])+'</td><td class="'+(x[1]=='up'?'on':'off')+'">'+esc(x[1])+'</td><td>'+esc(x[2])+'</td><td>'+esc(x[5])+'</td><td>'+esc(x[6])+'</td><td>'+mb(x[3]/1024)+'</td><td>'+mb(x[4]/1024)+'</td></tr>'}).join('')}
+  if(cl){var c=kv(cl.d);$('clk').innerHTML=items(c.c).map(function(x){return row(x[0],(x[1]/1e6).toFixed(2)+' MHz')}).join('')||'<span class="m">Not available</span>';
+    $('iio').innerHTML=items(c.x).map(function(x){var v=(+x[1]+ +x[2])*+x[3]/1000,t=x[0].indexOf('temp')==0;return isNaN(v)?'':row(x[0],t?v.toFixed(1)+' °C':v.toFixed(3)+' V')}).join('')||'<span class="m">Not available</span>'}
+  if(pi)pins(kv(pi.d))}
+var PD=null;
+function pins(p){if(p)PD=p;p=PD;if(!p)return;var base=+p.b,own={};(p.o||'').split(',').forEach(function(x){var i=x.split(':');if(i[1])own[i[0]]=i[1]});
+  var q=$('q').value.toLowerCase(),f=$('f').value,h='<tr><th>Pin</th><th>GPIO#</th><th>Dir</th><th>Level</th><th>Name / owner</th></tr>';
+  for(var n=0;n<p.d.length;n++){var g=base+n,t=n<54?'MIO '+n:'EMIO '+(n-54),nm=own[g]||LABELS[n]||'',d=p.d[n],v=p.v[n];
+    if(f=='MIO'&&n>=54||f=='EMIO'&&n<54||f=='u'&&!nm||f=='h'&&v!='1')continue;
+    if(q&&(t+' '+g+' '+nm).toLowerCase().indexOf(q)<0)continue;
+    h+='<tr><td>'+t+'</td><td>'+g+'</td><td>'+(d=='i'?'in':d=='o'?'out':'busy')+'</td><td class="'+(v=='1'?'hi':'')+'">'+(v=='1'?'HIGH':v=='0'?'low':'—')+'</td><td>'+esc(nm)+'</td></tr>'}
+  $('pins').innerHTML=h}
+$('q').oninput=$('f').onchange=function(){pins()};
+async function tick(){
+  if(!KEY){$('st').innerHTML='Open the <a href="index.html">main page</a> and enter your key first.';return}
+  try{var s=await call('info');if(!s.ok){$('st').textContent='Error: '+s.error;return}render(s)}catch(e){$('st').textContent='Connection problem: '+e.message}}
+tick();setInterval(tick,5000);
+</script></body></html>
